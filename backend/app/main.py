@@ -6,6 +6,7 @@ from app.ai.openrouter import ask_gemma
 from app.routes.discovery import router as discovery_router
 from app.api.export import router as export_router
 from app.api.projects import router as projects_router
+from app.api.project_management import router as project_management_router
 
 
 app = FastAPI(
@@ -29,6 +30,7 @@ app.add_middleware(
 app.include_router(discovery_router)
 app.include_router(export_router)
 app.include_router(projects_router)
+app.include_router(project_management_router)
 
 
 class ChatRequest(BaseModel):

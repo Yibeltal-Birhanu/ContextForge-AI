@@ -27,6 +27,43 @@ export interface ProjectState {
   deployment: string | null;
 }
 
+export interface QualityChecks {
+  requirements_coverage: number;
+  architecture_consistency: number;
+  technology_consistency: number;
+  api_coverage: number;
+  data_model_coverage: number;
+  security_coverage: number;
+  implementation_coverage: number;
+  agent_rules_quality: number;
+  definition_of_done: number;
+}
+
+export interface QualityWarning {
+  category: string;
+  message: string;
+}
+
+export interface QualityAssumption {
+  area: string;
+  assumption: string;
+  severity: string;
+}
+
+export interface QualityInfo {
+  overall_score: number;
+  validation_score: number;
+  readiness_score: number;
+  ready_for_agent: boolean;
+  checks: QualityChecks;
+  warnings_count: number;
+  assumptions_count: number;
+  warnings: QualityWarning[];
+  assumptions: QualityAssumption[];
+  errors: string[];
+  rejection_reasons: string[];
+}
+
 export interface PipelineResult {
   stage: PipelineStage;
   complete: boolean;
@@ -36,4 +73,5 @@ export interface PipelineResult {
   project_id: string | null;
   download_markdown: string | null;
   download_txt: string | null;
+  quality: QualityInfo | null;
 }

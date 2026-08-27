@@ -827,7 +827,7 @@ def _check_assumptions(
                         f"User constraint '{constraint}' "
                         "may not be reflected in the context."
                     ),
-                    severity="critical",
+                    severity="info",
                 ))
 
 
