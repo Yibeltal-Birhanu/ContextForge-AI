@@ -3,6 +3,7 @@ from typing import List, Optional
 
 
 class ImproveContextRequest(BaseModel):
+    project_id: Optional[str] = None
     project: dict
     answers: dict
     quality_checks: dict

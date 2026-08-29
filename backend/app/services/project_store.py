@@ -57,6 +57,7 @@ def list_projects() -> list[dict]:
 def update_project(
     project_id: str,
     name: str = None,
+    idea: str = None,
     description: str = None,
     status: str = None,
     current_stage: str = None,
@@ -72,6 +73,9 @@ def update_project(
     if name is not None:
         updates.append("name = ?")
         params.append(name)
+    if idea is not None:
+        updates.append("idea = ?")
+        params.append(idea)
     if description is not None:
         updates.append("description = ?")
         params.append(description)
@@ -305,13 +309,47 @@ def get_latest_artifact(project_id: str) -> Optional[dict]:
         "txt": row["txt"],
         "quality_score": row["quality_score"],
         "created_at": row["created_at"],
+    }# ============================================================
+# State save/resume (for discovery continuation)
+# ============================================================
+
+
+def save_project_state(
+    project_id: str,
+    project_data: dict,
+    status: str = None,
+    current_stage: str = None,
+    name: str = None,
+) -> Optional[dict]:
+    """Save full project state after each pipeline step.
+
+    This allows resuming a project that was interrupted mid-discovery.
+    """
+    return update_project(
+        project_id=project_id,
+        name=name,
+        status=status,
+        current_stage=current_stage,
+        project_data=project_data,
+    )
+
+
+def get_project_state(project_id: str) -> Optional[dict]:
+    """Get the saved project state for resumption."""
+    project = get_project(project_id)
+    if not project:
+        return None
+    return {
+        "project": project,
+        "project_data": project.get("project_data") or {},
+        "status": project.get("status"),
+        "current_stage": project.get("current_stage"),
     }
 
 
 # ============================================================
 # Helpers
 # ============================================================
-
 
 def _row_to_dict(row) -> dict:
     """Convert a sqlite3.Row to a dict."""

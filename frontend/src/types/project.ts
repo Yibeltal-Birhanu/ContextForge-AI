@@ -64,12 +64,19 @@ export interface QualityInfo {
   rejection_reasons: string[];
 }
 
+export interface ConversationEntry {
+  field: string;
+  question: string;
+  answer: string;
+}
+
 export interface PipelineResult {
   stage: PipelineStage;
   complete: boolean;
   project: ProjectState;
   missing_fields: string[];
   questions: Question[];
+  conversation_history: ConversationEntry[];
   project_id: string | null;
   download_markdown: string | null;
   download_txt: string | null;

@@ -15,12 +15,13 @@ export function getDownloadUrl(path: string): string {
 // ============================================================
 
 export async function startProject(
-  idea: string
+  idea: string,
+  projectId?: string | null
 ): Promise<PipelineResult> {
   const response = await fetch(`${API_URL}/projects/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ idea }),
+    body: JSON.stringify({ idea, project_id: projectId || undefined }),
   });
 
   if (!response.ok) {
@@ -34,12 +35,19 @@ export async function startProject(
 
 export async function continueProject(
   project: PipelineResult["project"],
-  answers: Record<string, string | string[]>
+  answers: Record<string, string | string[]>,
+  conversationHistory: Array<{ field: string; answer: string }> = [],
+  projectId?: string | null
 ): Promise<PipelineResult> {
   const response = await fetch(`${API_URL}/projects/continue`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ project, answers }),
+    body: JSON.stringify({
+      project,
+      answers,
+      conversation_history: conversationHistory,
+      project_id: projectId || undefined,
+    }),
   });
 
   if (!response.ok) {
@@ -54,12 +62,14 @@ export async function continueProject(
 export async function improveProject(
   project: PipelineResult["project"],
   answers: Record<string, string | string[]>,
-  qualityChecks: Record<string, unknown>
+  qualityChecks: Record<string, unknown>,
+  projectId?: string | null
 ): Promise<PipelineResult> {
   const response = await fetch(`${API_URL}/projects/improve`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
+      project_id: projectId || undefined,
       project,
       answers,
       quality_checks: qualityChecks,
@@ -194,4 +204,53 @@ export async function getProjectArtifacts(
 
   const data = await response.json();
   return data.artifacts || [];
+}
+
+// ============================================================
+// Resume endpoints
+// ============================================================
+
+export async function saveProjectState(
+  projectId: string,
+  projectData: Record<string, unknown>,
+  options: {
+    status?: string;
+    current_stage?: string;
+    name?: string;
+  } = {}
+): Promise<ProjectSummary> {
+  const response = await fetch(`${API_URL}/projects/${projectId}/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      project_data: projectData,
+      ...options,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error("Failed to save project state.");
+  }
+
+  return response.json();
+}
+
+export async function getProjectState(
+  projectId: string
+): Promise<{
+  project: ProjectSummary;
+  project_data: Record<string, unknown>;
+  status: string;
+  current_stage: string;
+}> {
+  const response = await fetch(`${API_URL}/projects/${projectId}/state`, {
+    method: "GET",
+    headers: { "Content-Type": "application/json" },
+  });
+
+  if (!response.ok) {
+    throw new Error("Project not found.");
+  }
+
+  return response.json();
 }

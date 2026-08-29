@@ -1,3 +1,5 @@
+import re
+
 from app.models.project import ProjectState
 from app.models.requirements import RequirementsDocument
 from app.models.architecture import ArchitectureDocument
@@ -7,6 +9,13 @@ from app.models.agent_readiness import (
     CheckScores,
     ReadinessWarning,
     ReadinessAssumption,
+)
+from app.utils.tech_normalizer import (
+    normalize_tech_list,
+    normalize_tech_name,
+    tech_sets_match,
+    classify_tech,
+    find_substituted_technologies,
 )
 
 
@@ -40,7 +49,7 @@ def check_agent_readiness(
     # 3. Technology Consistency
     # ============================================================
     tech_consistency = _check_technology_consistency(
-        architecture, context, warnings
+        project, architecture, context, warnings
     )
 
     # ============================================================
@@ -112,6 +121,17 @@ def check_agent_readiness(
     # ============================================================
     _check_scope(
         project, requirements, context, warnings
+    )
+
+    _check_context_isolation(
+        project, requirements, architecture, context, warnings
+    )
+
+    # ============================================================
+    # 14. Concurrency & Safety
+    # ============================================================
+    _check_concurrency_safety(
+        project, requirements, architecture, context, warnings
     )
 
     # ============================================================
@@ -272,63 +292,175 @@ def _check_architecture_consistency(
 
 
 def _check_technology_consistency(
+    project: ProjectState,
     architecture: ArchitectureDocument,
     context: ImplementationContext,
     warnings: list,
 ) -> int:
-    """Check technology stack matches between architecture and context."""
-    arch_techs = {
-        tc.technology.lower()
-        for tc in architecture.technology_stack
-    }
-    ctx_techs = {
-        t.lower()
-        for t in context.technology_stack
-    }
+    """Check technology stack consistency using canonical normalization."""
 
-    if not arch_techs and not ctx_techs:
+    # Normalize all technology lists to canonical sets
+    arch_raw = [tc.technology for tc in architecture.technology_stack]
+    ctx_raw = context.technology_stack
+    proj_raw = project.technologies or []
+
+    arch_norm = normalize_tech_list(arch_raw)
+    ctx_norm = normalize_tech_list(ctx_raw)
+    proj_norm = normalize_tech_list(proj_raw)
+
+    # Note: We do NOT add generic "ai" to proj_norm.
+    # "AI" is a concept, not a technology.  The concrete technology
+    # would be "OpenAI API", "Amazon Bedrock", etc.
+    # Checking for AI tech presence is done separately below.
+
+    if not arch_norm and not ctx_norm:
         warnings.append(ReadinessWarning(
             category="technology_consistency",
             message="No technology stack defined in architecture or context.",
         ))
         return 40
 
-    if not arch_techs:
+    if not arch_norm:
         return 80
 
-    if not ctx_techs:
+    if not ctx_norm:
         warnings.append(ReadinessWarning(
             category="technology_consistency",
             message="Context has no technology stack despite architecture defining one.",
         ))
         return 60
 
-    # Technologies in architecture should appear in context
-    missing_in_context = arch_techs - ctx_techs
     score = 100
 
-    if missing_in_context:
-        penalty = min(40, len(missing_in_context) * 8)
+    # Check 1: Technologies in architecture should appear in context (normalized)
+    _, missing_in_ctx, extra_in_ctx = tech_sets_match(arch_norm, ctx_norm)
+    if missing_in_ctx:
+        penalty = min(30, len(missing_in_ctx) * 6)
         score -= penalty
         warnings.append(ReadinessWarning(
             category="technology_consistency",
             message=(
                 f"Technologies in architecture not in context: "
-                f"{', '.join(sorted(missing_in_context))}"
+                f"{', '.join(sorted(missing_in_ctx))}"
             ),
         ))
 
-    # Technologies in context that aren't in architecture
-    extra_in_context = ctx_techs - arch_techs
-    if extra_in_context:
+    if extra_in_ctx:
         score -= 5
         warnings.append(ReadinessWarning(
             category="technology_consistency",
             message=(
                 f"Extra technologies in context not in architecture: "
-                f"{', '.join(sorted(extra_in_context))}"
+                f"{', '.join(sorted(extra_in_ctx))}"
             ),
         ))
+
+    # Check 3: User-selected technologies MUST be in architecture (no substitution)
+    user_selected_names = [t.name for t in project.user_selected_technologies]
+    if user_selected_names:
+        user_sel_norm = normalize_tech_list(user_selected_names)
+
+        # Check each user-selected tech is present in architecture
+        for ust in project.user_selected_technologies:
+            ust_norm = normalize_tech_name(ust.name)
+            if ust_norm and ust_norm not in arch_norm:
+                # Check if it's in context as fallback
+                if ust_norm in ctx_norm:
+                    warnings.append(ReadinessWarning(
+                        category="technology_consistency",
+                        message=(
+                            f"User-selected '{ust.name}' ({ust.purpose}) "
+                            "is in context but missing from architecture."
+                        ),
+                    ))
+                    score -= 5
+                else:
+                    score -= 15
+                    warnings.append(ReadinessWarning(
+                        category="technology_consistency",
+                        message=(
+                            f"MISSING: User-selected '{ust.name}' "
+                            f"({ust.purpose}) is not in architecture or context."
+                        ),
+                    ))
+
+        # Check for SILENT SUBSTITUTION: architecture uses different tech
+        # in same category as user-selected tech
+        substitutions = find_substituted_technologies(
+            user_selected_names,
+            [tc.technology for tc in architecture.technology_stack],
+        )
+        for sub in substitutions:
+            score -= 20
+            warnings.append(ReadinessWarning(
+                category="technology_consistency",
+                message=(
+                    f"CONTRADICTION: User selected {sub['user_techs']} "
+                    f"({sub['category']}) but architecture uses "
+                    f"{sub['arch_techs']} instead. "
+                    f"User-selected technologies must not be silently replaced."
+                ),
+            ))
+
+        # Also check context for substitution
+        ctx_substitutions = find_substituted_technologies(
+            user_selected_names,
+            ctx_raw,
+        )
+        for sub in ctx_substitutions:
+            # Only report if not already caught in architecture check
+            already_reported = any(
+                s["category"] == sub["category"] and s["user_techs"] == sub["user_techs"]
+                for s in substitutions
+            )
+            if not already_reported:
+                score -= 15
+                warnings.append(ReadinessWarning(
+                    category="technology_consistency",
+                    message=(
+                        f"User selected {sub['user_techs']} "
+                        f"({sub['category']}) but context uses "
+                        f"{sub['arch_techs']} instead."
+                    ),
+                ))
+
+    elif proj_norm:
+        # Fallback: project.technologies but no user_selected_technologies
+        _, missing_from_arch, _ = tech_sets_match(proj_norm, arch_norm)
+
+        if missing_from_arch:
+            penalty = min(25, len(missing_from_arch) * 8)
+            score -= penalty
+            warnings.append(ReadinessWarning(
+                category="technology_consistency",
+                message=(
+                    f"User-specified technologies not in architecture: "
+                    f"{', '.join(sorted(missing_from_arch))}"
+                ),
+            ))
+
+    # Check 4: Project AI mentions should have AI tech in architecture
+    # Only check for concrete AI technologies, not the generic concept "ai"
+    project_text = " ".join([
+        (project.description or "").lower(),
+        (project.problem or "").lower(),
+        " ".join(f.lower() for f in project.core_features),
+        " ".join(t.lower() for t in project.technologies),
+    ])
+    ai_keywords = ["artificial intelligence", "machine learning", "deep learning", "nlp"]
+    project_mentions_ai = any(kw in project_text for kw in ai_keywords)
+    if project_mentions_ai:
+        arch_text = " ".join(tc.technology.lower() + " " + tc.reason.lower()
+                           for tc in architecture.technology_stack)
+        concrete_ai_techs = ["openai", "anthropic", "tensorflow", "pytorch",
+                           "huggingface", "langchain", "bedrock", "vertex"]
+        ai_in_arch = any(kw in arch_text for kw in concrete_ai_techs)
+        if not ai_in_arch:
+            score -= 15
+            warnings.append(ReadinessWarning(
+                category="technology_consistency",
+                message="Project mentions AI capabilities but no concrete AI technology found in architecture.",
+            ))
 
     return max(0, min(100, score))
 
@@ -651,27 +783,40 @@ def _check_contradictions(
     warnings: list,
 ) -> None:
     """Detect conflicting decisions across documents."""
+    from app.utils.tech_normalizer import _are_equivalent
+
     # Check if project technologies contradict architecture
     if project.technologies:
-        arch_techs = {
-            tc.technology.lower() for tc in architecture.technology_stack
-        }
+        arch_techs = normalize_tech_list(
+            [tc.technology for tc in architecture.technology_stack]
+        )
         for tech in project.technologies:
-            if tech.lower() not in arch_techs:
+            tech_norm = normalize_tech_name(tech)
+            if tech_norm not in arch_techs:
                 # Check if it's mentioned differently
-                tech_words = set(tech.lower().split())
+                tech_words = set(tech_norm.split())
                 found = any(
                     tech_words <= set(tc.technology.lower().split())
                     for tc in architecture.technology_stack
                 )
                 if not found:
-                    warnings.append(ReadinessWarning(
-                        category="contradiction",
-                        message=(
-                            f"Project specified '{tech}' but architecture "
-                            "does not include it in the technology stack."
-                        ),
-                    ))
+                    # Check tech equivalents (e.g. TypeScript/JavaScript)
+                    arch_norm_set = normalize_tech_list(
+                        [tc.technology for tc in architecture.technology_stack]
+                    )
+                    tech_canonical = normalize_tech_name(tech)
+                    is_equivalent = any(
+                        _are_equivalent(tech_canonical, a)
+                        for a in arch_norm_set
+                    )
+                    if not is_equivalent:
+                        warnings.append(ReadinessWarning(
+                            category="contradiction",
+                            message=(
+                                f"Project specified '{tech}' but architecture "
+                                "does not include it in the technology stack."
+                            ),
+                        ))
 
     # Check if platform info contradicts
     if project.platform:
@@ -706,6 +851,68 @@ def _check_contradictions(
                 message=(
                     f"Project deployment preference '{project.deployment}' "
                     "not reflected in architecture deployment plan."
+                ),
+            ))
+
+    # Check AI contradiction — only for CONCRETE AI technologies
+    # "AI" is a concept, not a technology.  Check if the user explicitly
+    # named an AI provider (OpenAI, Bedrock, etc.) and it's missing.
+    if project.technologies:
+        ai_providers = {"openai", "anthropic", "tensorflow", "pytorch",
+                       "huggingface", "langchain", "amazon bedrock",
+                       "aws bedrock", "google vertex ai", "azure openai"}
+        project_ai_techs = [
+            t for t in project.technologies
+            if t.lower().strip() in ai_providers
+            or normalize_tech_name(t) in ai_providers
+        ]
+        if project_ai_techs:
+            arch_norm = normalize_tech_list(
+                [tc.technology for tc in architecture.technology_stack]
+            )
+            for ai_tech in project_ai_techs:
+                ai_norm = normalize_tech_name(ai_tech)
+                if ai_norm and ai_norm not in arch_norm:
+                    # Check if it's in context as fallback
+                    ctx_norm = normalize_tech_list(context.technology_stack)
+                    if ai_norm not in ctx_norm:
+                        warnings.append(ReadinessWarning(
+                            category="contradiction",
+                            message=(
+                                f"Project specified AI technology '{ai_tech}' "
+                                "but it is not in architecture or context."
+                            ),
+                        ))
+
+    # Check database contradiction using normalized tech comparison
+    if project.database and project.database.lower() not in ["not decided", "none", "no preference"]:
+        arch_norm = normalize_tech_list([tc.technology for tc in architecture.technology_stack])
+        ctx_norm = normalize_tech_list(context.technology_stack)
+        db_norm = normalize_tech_list([project.database])
+        all_norm = arch_norm | ctx_norm
+        _, missing_db, _ = tech_sets_match(db_norm, all_norm)
+        if missing_db:
+            warnings.append(ReadinessWarning(
+                category="contradiction",
+                message=(
+                    f"Project specified database '{project.database}' "
+                    "but architecture does not reference it."
+                ),
+            ))
+
+    # Check user-selected technology substitution (semantic, not string)
+    if project.user_selected_technologies:
+        user_techs = [t.name for t in project.user_selected_technologies]
+        arch_techs = [tc.technology for tc in architecture.technology_stack]
+        substitutions = find_substituted_technologies(user_techs, arch_techs)
+        for sub in substitutions:
+            warnings.append(ReadinessWarning(
+                category="contradiction",
+                message=(
+                    f"User explicitly selected {sub['user_techs']} "
+                    f"for {sub['category']} but architecture uses "
+                    f"{sub['arch_techs']} instead. "
+                    f"User-selected technologies MUST NOT be silently replaced."
                 ),
             ))
 
@@ -760,21 +967,47 @@ def _check_assumptions(
     assumptions: list,
 ) -> None:
     """Identify AI-inferred decisions not explicitly specified by user."""
+    # Build the set of user-selected technology normalized names
+    user_sel_norm = {
+        normalize_tech_name(t.name)
+        for t in project.user_selected_technologies
+    }
+
+    # Also include database and deployment if user specified them
+    if project.database and project.database.lower() not in (
+        "not decided", "none", "unknown",
+    ):
+        user_sel_norm.add(normalize_tech_name(project.database))
+
     # Check if technology choices were made by AI
-    if project.technologies and architecture.technology_stack:
-        user_techs = {
-            t.lower() for t in project.technologies
-        }
+    # Only report as AI assumption if NOT in user-selected or user-specified techs
+    if architecture.technology_stack:
         for tc in architecture.technology_stack:
-            if tc.technology.lower() not in user_techs:
-                assumptions.append(ReadinessAssumption(
-                    area="technology",
-                    assumption=(
-                        f"{tc.technology} was selected by AI "
-                        f"(reason: {tc.reason})"
-                    ),
-                    severity="info",
-                ))
+            tc_norm = normalize_tech_name(tc.technology)
+
+            # Skip if this is a user-selected technology
+            if tc_norm in user_sel_norm:
+                continue
+
+            # Skip if it matches a user-specified technology (exact or fuzzy)
+            is_user_tech = False
+            if project.technologies:
+                for ut in project.technologies:
+                    ut_norm = normalize_tech_name(ut)
+                    if ut_norm == tc_norm or tc_norm in ut_norm or ut_norm in tc_norm:
+                        is_user_tech = True
+                        break
+            if is_user_tech:
+                continue
+
+            assumptions.append(ReadinessAssumption(
+                area="technology",
+                assumption=(
+                    f"{tc.technology} was selected by AI "
+                    f"(reason: {tc.reason})"
+                ),
+                severity="info",
+            ))
 
     # Check if database was decided by AI
     if not project.database or project.database.lower() in (
@@ -786,14 +1019,17 @@ def _check_assumptions(
             if tc.category.lower() in ("database", "data")
         ]
         for tc in db_techs:
-            assumptions.append(ReadinessAssumption(
-                area="database",
-                assumption=(
-                    f"{tc.technology} was selected as database "
-                    f"by AI (reason: {tc.reason})"
-                ),
-                severity="warning",
-            ))
+            # Don't report if already covered by user-selected check above
+            tc_norm = normalize_tech_name(tc.technology)
+            if tc_norm not in user_sel_norm:
+                assumptions.append(ReadinessAssumption(
+                    area="database",
+                    assumption=(
+                        f"{tc.technology} was selected as database "
+                        f"by AI (reason: {tc.reason})"
+                    ),
+                    severity="info",
+                ))
 
     # Check if deployment was decided by AI
     if not project.deployment or project.deployment.lower() in (
@@ -806,7 +1042,7 @@ def _check_assumptions(
                     f"Deployment plan ({architecture.deployment[0].environment}) "
                     "was designed by AI without user specification."
                 ),
-                severity="warning",
+                severity="info",
             ))
 
     # Check if constraints were ignored
@@ -880,3 +1116,329 @@ def _check_scope(
             category="scope",
             message="No non-functional requirements defined despite having functional ones.",
         ))
+
+    constraint_text = " ".join(project.constraints).lower()
+    simplicity_requested = any(
+        phrase in constraint_text
+        for phrase in ("mvp", "simple", "low-cost", "low cost", "limited budget")
+    )
+    if simplicity_requested and fr_count > 12:
+        warnings.append(ReadinessWarning(
+            category="scope",
+            message=(
+                f"MVP/simple-scope constraint with {fr_count} functional "
+                "requirements. Mark a smaller must-have set for the MVP."
+            ),
+        ))
+
+    if fr_count > 0:
+        priorities = {
+            requirement.priority.upper()
+            for requirement in requirements.functional_requirements
+        }
+        if not priorities.intersection({"MUST_HAVE", "MUST", "P0", "HIGH"}):
+            warnings.append(ReadinessWarning(
+                category="scope",
+                message="Functional requirements have no explicit MVP must-have priority.",
+            ))
+
+    context_entry_count = sum(
+        len(values) for values in (
+            context.functional_requirements,
+            context.non_functional_requirements,
+            context.data_model,
+            context.api_contract,
+            context.security_requirements,
+            context.definition_of_done,
+        )
+    )
+    context_size = len(context.model_dump_json())
+    if context_entry_count > 80 or context_size > 50000:
+        warnings.append(ReadinessWarning(
+            category="scope",
+            message=(
+                f"Implementation context is large ({context_entry_count} entries, "
+                f"{context_size} characters). Consider splitting or removing "
+                "non-essential detail."
+            ),
+        ))
+
+
+def _check_context_isolation(
+    project: ProjectState,
+    requirements: RequirementsDocument,
+    architecture: ArchitectureDocument,
+    context: ImplementationContext,
+    warnings: list,
+) -> None:
+    """Detect high-confidence domain vocabulary leaking between projects."""
+    project_text = " ".join([
+        project.name or "",
+        project.description or "",
+        project.problem or "",
+        " ".join(project.core_features),
+        " ".join(project.target_users),
+    ]).lower()
+    generated_text = " ".join([
+        context.project_summary,
+        context.problem,
+        " ".join(context.target_users),
+        " ".join(context.functional_requirements),
+        " ".join(context.data_model),
+        " ".join(context.api_contract),
+    ]).lower()
+    domain_groups = {
+        "healthcare": {"patient", "patients", "clinic", "clinics", "doctor", "doctors"},
+        "agriculture": {"farmer", "farmers", "crop", "crops", "supplier", "suppliers"},
+        "education": {"student", "students", "course", "courses", "teacher", "teachers"},
+        "commerce": {"product", "products", "cart", "checkout", "order", "orders"},
+    }
+    project_domains = {
+        domain for domain, terms in domain_groups.items()
+        if any(re.search(rf"\b{re.escape(term)}\b", project_text) for term in terms)
+    }
+    leaked = []
+    for domain, terms in domain_groups.items():
+        if domain in project_domains:
+            continue
+        if any(re.search(rf"\b{re.escape(term)}\b", generated_text) for term in terms):
+            leaked.append(domain)
+    if leaked:
+        warnings.append(ReadinessWarning(
+            category="context_isolation",
+            message=(
+                "Generated context contains domain vocabulary not found in the "
+                f"project: {', '.join(sorted(leaked))}. Verify cross-project isolation."
+            ),
+        ))
+
+
+def _check_concurrency_safety(
+    project: ProjectState,
+    requirements: RequirementsDocument,
+    architecture: ArchitectureDocument,
+    context: ImplementationContext,
+    warnings: list,
+) -> None:
+    """Check that concurrency-critical patterns are addressed.
+
+    For projects involving bookings, payments, or background jobs,
+    verify that the architecture and context describe the correct
+    safety mechanisms (locking, idempotency, job claiming).
+    """
+    # Combine all relevant text
+    all_arch_text = (
+        architecture.system_architecture + " "
+        + " ".join(c.responsibility + " " + " ".join(c.technologies)
+                    for c in architecture.components) + " "
+        + " ".join(d.environment + " " + d.reason
+                    for d in architecture.deployment)
+    ).lower()
+
+    all_ctx_text = (
+        " ".join(context.functional_requirements) + " "
+        + " ".join(context.non_functional_requirements) + " "
+        + " ".join(context.security_requirements) + " "
+        + " ".join(r.rule for r in context.agent_rules) + " "
+        + " ".join(phase.objective + " " + " ".join(phase.tasks)
+                    for phase in context.implementation_phases)
+    ).lower()
+
+    all_text = all_arch_text + " " + all_ctx_text
+
+    # --- A. Booking / Reservation systems ---
+    has_booking = any(
+        word in all_text
+        for word in ["booking", "appointment", "reservation",
+                     "schedule", "slot"]
+    )
+    if has_booking:
+        has_locking = any(
+            word in all_text
+            for word in ["for update", "select for update",
+                         "row lock", "pessimistic lock",
+                         "unique constraint", "unique key",
+                         "database-level constraint"]
+        )
+        if not has_locking:
+            warnings.append(ReadinessWarning(
+                category="concurrency_safety",
+                message=(
+                    "Project has booking/reservation features but "
+                    "architecture does not describe a locking strategy. "
+                    "Double-booking is likely without database-level locking "
+                    "(SELECT ... FOR UPDATE or UNIQUE constraints)."
+                ),
+            ))
+
+    # --- B. Payment processing ---
+    has_payment = any(
+        word in all_text
+        for word in ["payment", "pay", "checkout", "transaction",
+                     "webhook", "callback"]
+    )
+    if has_payment:
+        has_idempotency = any(
+            word in all_text
+            for word in ["idempoten", "dedup", "duplicate",
+                         "unique constraint", "provider reference",
+                         "transaction reference"]
+        )
+        if not has_idempotency:
+            warnings.append(ReadinessWarning(
+                category="concurrency_safety",
+                message=(
+                    "Project has payment features but architecture "
+                    "does not describe webhook idempotency. "
+                    "Duplicate payment processing is likely without "
+                    "idempotent handlers and unique constraints."
+                ),
+            ))
+
+        has_state_machine = any(
+            word in all_text
+            for word in ["initiated", "pending", "completed",
+                         "failed", "refunded", "status machine",
+                         "state machine", "payment status"]
+        )
+        if not has_state_machine:
+            warnings.append(ReadinessWarning(
+                category="concurrency_safety",
+                message=(
+                    "Payment processing lacks a clear status state machine. "
+                    "Define explicit payment states and transitions."
+                ),
+            ))
+
+    # --- C. Background jobs with multi-replica deployment ---
+    has_bg_jobs = any(
+        word in all_text
+        for word in ["cron", "scheduler", "background", "worker",
+                     "reminder", "periodic", "recurring"]
+    )
+    has_multi_replica = any(
+        word in all_text
+        for word in ["fargate", "kubernetes", "k8s", "ecs",
+                     "horizontal", "scaling", "replica",
+                     "multiple instance", "load balanc"]
+    )
+    if has_bg_jobs and has_multi_replica:
+        has_safe_scheduling = any(
+            word in all_text
+            for word in ["for update skip locked", "job claim",
+                         "distributed lock", "leader elect",
+                         "eventbridge scheduler", "single replica",
+                         "single instance", "database-based job"]
+        )
+        uses_inprocess_cron = any(
+            word in all_text
+            for word in ["node-cron", "setinterval", "setinterval",
+                         "in-process cron", "setTimeout"]
+        ) and not has_safe_scheduling
+
+        if uses_inprocess_cron:
+            warnings.append(ReadinessWarning(
+                category="concurrency_safety",
+                message=(
+                    "CRITICAL: In-process cron/scheduler detected with "
+                    "multi-replica deployment. Each replica will fire "
+                    "scheduled jobs independently, causing duplicate "
+                    "processing (e.g. duplicate SMS, duplicate emails). "
+                    "Use database-based job claiming (SELECT ... FOR UPDATE "
+                    "SKIP LOCKED) or a managed scheduler instead."
+                ),
+            ))
+        elif not has_safe_scheduling:
+            warnings.append(ReadinessWarning(
+                category="concurrency_safety",
+                message=(
+                    "Project has background jobs and multi-replica "
+                    "deployment but does not describe a safe scheduling "
+                    "strategy. Verify that job deduplication is addressed."
+                ),
+            ))
+
+    # --- D. Healthcare / sensitive data ---
+    has_sensitive_data = any(
+        word in all_text
+        for word in ["patient", "health", "medical", "clinical",
+                     "diagnosis", "health record"]
+    )
+    if has_sensitive_data:
+        has_audit = any(
+            word in all_text
+            for word in ["audit", "audit log", "activity log",
+                         "access log"]
+        )
+        if not has_audit:
+            warnings.append(ReadinessWarning(
+                category="concurrency_safety",
+                message=(
+                    "Project handles sensitive health data but "
+                    "architecture does not describe audit logging. "
+                    "Healthcare applications require comprehensive "
+                    "audit trails for compliance."
+                ),
+            ))
+
+        has_encryption = any(
+            word in all_text
+            for word in ["encrypt", "aes", "at rest", "in transit",
+                         "tls", "ssl", "kms"]
+        )
+        if not has_encryption:
+            warnings.append(ReadinessWarning(
+                category="concurrency_safety",
+                message=(
+                    "Project handles sensitive health data but "
+                    "architecture does not describe encryption "
+                    "strategy (at rest and in transit)."
+                ),
+            ))
+
+    # --- E. AI integrations requiring disclaimer ---
+    has_ai = any(
+        word in all_text
+        for word in ["ai", "artificial intelligence", "machine learning",
+                     "openai", "bedrock", "llm", "gpt", "claude"]
+    )
+    if has_ai and has_sensitive_data:
+        has_disclaimer = any(
+            word in all_text
+            for word in ["disclaimer", "not medical advice",
+                         "not professional advice",
+                         "general information",
+                         "consult a professional"]
+        )
+        if not has_disclaimer:
+            warnings.append(ReadinessWarning(
+                category="concurrency_safety",
+                message=(
+                    "AI integration in healthcare context lacks a "
+                    "disclaimer strategy. The AI component MUST include "
+                    "a disclaimer that it is not medical advice and that "
+                    "users should consult qualified professionals."
+                ),
+            ))
+
+    # --- F. Secrets management ---
+    has_external_apis = any(
+        word in all_text
+        for word in ["api key", "api credential", "secret",
+                     "token", "webhook"]
+    )
+    if has_external_apis:
+        has_secrets_mgmt = any(
+            word in all_text
+            for word in ["secrets manager", "vault", "secret manager",
+                         "aws secrets", "environment variable"]
+        )
+        if not has_secrets_mgmt:
+            warnings.append(ReadinessWarning(
+                category="concurrency_safety",
+                message=(
+                    "Project uses external APIs but does not describe "
+                    "a secrets management strategy. API keys and "
+                    "credentials must be stored securely."
+                ),
+            ))

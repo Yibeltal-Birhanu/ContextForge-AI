@@ -27,6 +27,7 @@ class QualityInfo(BaseModel):
     assumptions: list[dict] = []
     errors: list[str] = []
     rejection_reasons: list[str] = []
+    tech_preservation: dict = {}
 
 
 class PipelineResult(BaseModel):
@@ -37,6 +38,7 @@ class PipelineResult(BaseModel):
 
     missing_fields: list[str] = []
     questions: list[dict] = []
+    conversation_history: list[dict] = []
 
     project_id: str | None = None
     download_markdown: str | None = None

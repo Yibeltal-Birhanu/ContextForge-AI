@@ -12,6 +12,7 @@ class TechnologyChoice(BaseModel):
     category: str
     technology: str
     reason: str
+    status: str = "MVP_REQUIRED"
 
 
 class DataEntity(BaseModel):

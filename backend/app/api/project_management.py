@@ -11,6 +11,8 @@ from app.services.project_store import (
     get_context,
     get_artifacts,
     get_latest_artifact,
+    save_project_state,
+    get_project_state,
 )
 
 router = APIRouter(
@@ -128,6 +130,54 @@ async def delete_project_detail(project_id: str):
 
         delete_project(project_id)
         return {"message": "Project deleted.", "project_id": project_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# Resume endpoint
+# ============================================================
+
+
+class ResumeProjectRequest(BaseModel):
+    project_data: dict
+    status: str = None
+    current_stage: str = None
+    name: str = None
+
+
+@router.post("/{project_id}/resume")
+async def resume_project(project_id: str, request: ResumeProjectRequest):
+    """Save project state for resumption after interruption."""
+    try:
+        existing = get_project(project_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Project not found.")
+
+        updated = save_project_state(
+            project_id=project_id,
+            project_data=request.project_data,
+            status=request.status,
+            current_stage=request.current_stage,
+            name=request.name,
+        )
+        return updated
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{project_id}/state")
+async def get_project_resume_state(project_id: str):
+    """Get the saved project state for resumption."""
+    try:
+        state = get_project_state(project_id)
+        if not state:
+            raise HTTPException(status_code=404, detail="Project not found.")
+        return state
     except HTTPException:
         raise
     except Exception as e:

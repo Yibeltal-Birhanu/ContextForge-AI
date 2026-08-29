@@ -29,6 +29,7 @@ async def start(
     try:
         result = await start_project(
             request.idea,
+            project_id=request.project_id,
         )
         return result.model_dump()
     except RuntimeError as e:
@@ -57,6 +58,8 @@ async def continue_(
         result = await continue_project(
             request.project,
             request.answers,
+            conversation_history=request.conversation_history,
+            project_id=request.project_id,
         )
         return result.model_dump()
     except RuntimeError as e:
@@ -82,11 +85,20 @@ async def improve(
     request: ImproveContextRequest,
 ):
     try:
-        result = await improve_project_context(
-            project_data=request.project,
-            answers=request.answers,
-            quality_checks=request.quality_checks,
-        )
+        if request.project_id:
+            from app.services.project_pipeline import improve_persistent_project
+            result = await improve_persistent_project(
+                project_id=request.project_id,
+                project_data=request.project,
+                answers=request.answers,
+                quality_checks=request.quality_checks,
+            )
+        else:
+            result = await improve_project_context(
+                project_data=request.project,
+                answers=request.answers,
+                quality_checks=request.quality_checks,
+            )
         return result.model_dump()
     except RuntimeError as e:
         error_msg = str(e)
