@@ -93,13 +93,56 @@ async def _call_openrouter(
 
 
 def _parse_json_content(content: str) -> dict:
-    """Parse JSON from LLM response, handling markdown code blocks."""
+    """Parse JSON from LLM response, handling markdown code blocks.
+    
+    Attempts to fix common LLM JSON issues:
+    - Markdown code blocks
+    - Trailing commas
+    - Missing commas between properties
+    - Unterminated strings
+    """
     content = content.strip()
     if content.startswith("```"):
         content = content.split("\n", 1)[1]
         content = content.rsplit("```", 1)[0]
         content = content.strip()
-    return json.loads(content)
+
+    # Try parsing as-is first
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        pass
+
+    # Fix trailing commas: ,} or ,]
+    import re
+    fixed = re.sub(r',\s*([}\]])', r'\1', content)
+    try:
+        return json.loads(fixed)
+    except json.JSONDecodeError:
+        pass
+
+    # Fix missing commas between properties: "value" "key"
+    fixed2 = re.sub(r'"\s*\n\s*"', '",\n"', fixed)
+    try:
+        return json.loads(fixed2)
+    except json.JSONDecodeError:
+        pass
+
+    # Try to find the JSON object in the content
+    start = content.find('{')
+    end = content.rfind('}')
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(content[start:end+1])
+        except json.JSONDecodeError:
+            pass
+
+    # Last resort: raise with original content for debugging
+    raise json.JSONDecodeError(
+        f"Failed to parse LLM JSON response",
+        content,
+        0,
+    )
 
 
 async def ask_gemma(message: str) -> str:
@@ -113,13 +156,33 @@ async def ask_gemma(message: str) -> str:
 async def generate_structured(
     system_prompt: str,
     user_message: str,
+    max_retries: int = 2,
 ) -> dict:
-    """Structured JSON generation with automatic fallback."""
-    result = await _call_openrouter(
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
-        response_format={"type": "json_object"},
+    """Structured JSON generation with automatic fallback and retry."""
+    last_error = None
+
+    for attempt in range(max_retries + 1):
+        result = await _call_openrouter(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            response_format={"type": "json_object"},
+        )
+        try:
+            return _parse_json_content(result["content"])
+        except (json.JSONDecodeError, ValueError) as e:
+            last_error = e
+            if attempt < max_retries:
+                # Add a retry instruction to the message
+                user_message = (
+                    f"{user_message}\n\n"
+                    "IMPORTANT: Your previous response contained invalid JSON. "
+                    "Please return ONLY valid JSON with no trailing commas, "
+                    "no missing commas, and properly escaped strings."
+                )
+                continue
+
+    raise RuntimeError(
+        f"Failed to parse JSON after {max_retries + 1} attempts: {last_error}"
     )
-    return _parse_json_content(result["content"])

@@ -2,6 +2,122 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
-  font-family: system-ui, -apple-system, sans-serif;
+:root {
+  --sidebar-width: 260px;
+  --sidebar-collapsed: 0px;
 }
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
+}
+
+/* Dark sidebar scrollbar */
+.sidebar-scroll::-webkit-scrollbar-thumb {
+  background: #374151;
+}
+
+.sidebar-scroll::-webkit-scrollbar-thumb:hover {
+  background: #4b5563;
+}
+
+/* Auto-grow textarea */
+.auto-grow {
+  field-sizing: content;
+  min-height: 44px;
+  max-height: 200px;
+  resize: none;
+}
+
+/* Fallback for browsers without field-sizing */
+@supports not (field-sizing: content) {
+  .auto-grow {
+    height: auto;
+    overflow-y: auto;
+  }
+}
+
+/* Message animation */
+@keyframes messageSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.message-enter {
+  animation: messageSlideIn 0.2s ease-out;
+}
+
+/* Toast animation */
+@keyframes toastSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.toast-enter {
+  animation: toastSlideIn 0.25s ease-out;
+}
+
+/* Pulse dot for loading */
+@keyframes pulseDot {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+
+.pulse-dot-1 { animation: pulseDot 1.4s infinite 0s; }
+.pulse-dot-2 { animation: pulseDot 1.4s infinite 0.2s; }
+.pulse-dot-3 { animation: pulseDot 1.4s infinite 0.4s; }
+
+/* Focus ring utility */
+.focus-ring {
+  @apply focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:ring-offset-1;
+}
+
+/* Markdown rendered content */
+.prose h1 { @apply text-xl font-bold text-gray-900 mb-3 mt-6; }
+.prose h2 { @apply text-lg font-bold text-gray-900 mb-2 mt-5; }
+.prose h3 { @apply text-base font-semibold text-gray-800 mb-2 mt-4; }
+.prose p { @apply text-sm text-gray-700 mb-3 leading-relaxed; }
+.prose ul { @apply list-disc pl-5 mb-3 text-sm text-gray-700; }
+.prose ol { @apply list-decimal pl-5 mb-3 text-sm text-gray-700; }
+.prose li { @apply mb-1; }
+.prose code { @apply bg-gray-100 text-gray-800 px-1.5 py-0.5 rounded text-xs font-mono; }
+.prose pre { @apply bg-gray-900 text-gray-100 p-4 rounded-lg mb-3 overflow-x-auto text-xs; }
+.prose pre code { @apply bg-transparent text-gray-100 p-0; }
+.prose table { @apply w-full border-collapse mb-3 text-sm; }
+.prose th { @apply text-left p-2 border-b-2 border-gray-300 font-semibold text-gray-700; }
+.prose td { @apply p-2 border-b border-gray-200; }
+.prose blockquote { @apply border-l-4 border-gray-300 pl-4 italic text-gray-600 mb-3; }
+.prose hr { @apply border-gray-200 my-6; }
+.prose strong { @apply font-semibold text-gray-900; }
+.prose a { @apply text-blue-600 hover:underline; }

@@ -10,6 +10,7 @@ from app.services.artifact_store import (
     save_artifact,
     get_artifact,
 )
+from app.services.project_store import get_artifact_content
 
 router = APIRouter(
     prefix="/export",
@@ -50,9 +51,7 @@ def download_markdown(
     project_id: str,
 ):
 
-    artifact = get_artifact(
-        project_id
-    )
+    artifact = get_artifact(project_id) or get_artifact_content(project_id)
 
     if artifact is None:
         raise HTTPException(
@@ -60,14 +59,11 @@ def download_markdown(
             detail="Artifact not found.",
         )
 
-    filename = (
-        f"{artifact.project_name}"
-        .replace(" ", "_")
-        + ".md"
-    )
+    filename = f"contextforge_{project_id}.md"
 
+    markdown = artifact.markdown if hasattr(artifact, "markdown") else artifact["markdown"]
     return Response(
-        content=artifact.markdown,
+        content=markdown,
         media_type="text/markdown",
         headers={
             "Content-Disposition": (
@@ -84,9 +80,7 @@ def download_text(
     project_id: str,
 ):
 
-    artifact = get_artifact(
-        project_id
-    )
+    artifact = get_artifact(project_id) or get_artifact_content(project_id)
 
     if artifact is None:
         raise HTTPException(
@@ -94,14 +88,11 @@ def download_text(
             detail="Artifact not found.",
         )
 
-    filename = (
-        f"{artifact.project_name}"
-        .replace(" ", "_")
-        + ".txt"
-    )
+    filename = f"contextforge_{project_id}.txt"
 
+    text = artifact.text if hasattr(artifact, "text") else artifact["txt"]
     return Response(
-        content=artifact.text,
+        content=text,
         media_type="text/plain",
         headers={
             "Content-Disposition": (
